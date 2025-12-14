@@ -5161,82 +5161,65 @@ app.use((err, req, res, next) => {
 // SECTION 23: TICKET ARTICLES ROUTES
 // ===========================================
 // Get All Articles
-v1Router.get(
-  "/articles",
-  optionalAuthenticate,
-  loadUserRole,
-  async (req, res) => {
-    try {
-      const {
-        status,
-        kategori_artikel,
-        id_ticket,
-        author_name,
-        tags,
-      } = req.query;
+v1Router.get("/articles", authenticate, async (req, res) => {
+  try {
+    const {
+      status,
+      kategori_artikel,
+      visibility,
+      id_ticket,
+      author_name,
+      tags,
+    } = req.query;
+    const limit = parseInt(req.query.limit) || 50;
+    const page = parseInt(req.query.page) || 1;
+    const offset = (page - 1) * limit;
 
-      const limit = parseInt(req.query.limit) || 50;
-      const page = parseInt(req.query.page) || 1;
-      const offset = (page - 1) * limit;
+    let query = supabase
+      .from("o_ticket_articles")
+      .select(
+        `
+        *,
+        ticket:id_ticket (
+          id, ticket_number, title, status
+        )
+      `,
+        { count: "exact" }
+      )
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
 
-      let query = supabase
-        .from("o_ticket_articles")
-        .select(`*, ticket:id_ticket (id, ticket_number, title)`, {
-          count: "exact",
-        })
-        .order("created_at", { ascending: false })
-        .range(offset, offset + limit - 1);
-
-      /** 🔐 FILTER BERDASARKAN ROLE */
-      if (req.role === "public") {
-        query = query
-          .eq("status", "Published")
-          .eq("visibility", "public");
-      }
-
-      if (req.role === "pegawai") {
-        query = query
-          .eq("status", "Published")
-          .in("visibility", ["public", "internal_opd"]);
-      }
-
-      if (req.role === "teknisi") {
-        // bisa lihat semua
-      }
-
-      if (req.role === "admin") {
-        // bisa lihat semua
-      }
-
-      /** FILTER TAMBAHAN */
-      if (status) query = query.eq("status", status);
-      if (kategori_artikel)
-        query = query.eq("kategori_artikel", kategori_artikel);
-      if (id_ticket) query = query.eq("id_ticket", id_ticket);
-      if (author_name)
-        query = query.ilike("author_name", `%${author_name}%`);
-      if (tags) query = query.contains("tags", [tags]);
-
-      const { data, error, count } = await query;
-      if (error) throw error;
-
-      res.json({
-        status: true,
-        message: "Articles retrieved successfully",
-        data,
-        pagination: {
-          total: count,
-          page,
-          limit,
-          totalPages: Math.ceil(count / limit),
-        },
-      });
-    } catch (error) {
-      res.status(500).json({ status: false, error: error.message });
+    // Apply filters
+    if (status) query = query.eq("status", status);
+    if (kategori_artikel)
+      query = query.eq("kategori_artikel", kategori_artikel);
+    if (visibility) query = query.eq("visibility", visibility);
+    if (id_ticket) query = query.eq("id_ticket", id_ticket);
+    if (author_name) query = query.ilike("author_name", `%${author_name}%`);
+    if (tags) {
+      // Filter by tags (contains any of the specified tags)
+      query = query.contains("tags", [tags]);
     }
-  }
-);
 
+    const { data, error, count } = await query;
+    if (error) throw error;
+
+    res.json({
+      status: true,
+      message: "Articles retrieved successfully",
+      data,
+      pagination: {
+        total: count,
+        page,
+        limit,
+        totalPages: Math.ceil(count / limit),
+      },
+    });
+  } catch (error) {
+    console.error("Get articles error:", error);
+    res.status(500).json({ status: false, error: error.message });
+  }
+});
 
 // Get Article Categories
 v1Router.get("/articles/categories", authenticate, async (req, res) => {
@@ -5644,31 +5627,58 @@ v1Router.delete(
 v1Router.patch(
   "/articles/:id/status",
   authenticate,
-  authorizeRole(["admin"]),
+  authorize("kb.write"),
   async (req, res) => {
-    const { status } = req.body;
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
 
-    const allowed = ["Menunggu Review", "Published", "Rejected"];
-    if (!allowed.includes(status)) {
-      return res.status(400).json({ error: "Invalid status" });
-    }
+      if (!status) {
+        return res
+          .status(400)
+          .json({ status: false, error: "Status is required" });
+      }
 
-    const { data, error } = await supabase
-      .from("o_ticket_articles")
-      .update({
+      const validStatuses = [
+        "Draft",
+        "Menunggu Review",
+        "Published",
+        "Rejected",
+        "Archived",
+      ];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({
+          status: false,
+          error: `Invalid status. Must be one of: ${validStatuses.join(", ")}`,
+        });
+      }
+
+      let query = supabase.from("o_ticket_articles").update({
         status,
         updated_at: new Date().toISOString(),
-      })
-      .eq("id_artikel", req.params.id)
-      .select()
-      .single();
+      });
 
-    if (error) return res.status(500).json(error);
+      if (!isNaN(id)) {
+        query = query.eq("id_artikel", id);
+      } else {
+        query = query.eq("custom_id", id);
+      }
 
-    res.json({ status: true, data });
+      const { data, error } = await query.select().single();
+
+      if (error) throw error;
+
+      res.json({
+        status: true,
+        message: "Article status updated successfully",
+        data,
+      });
+    } catch (error) {
+      console.error("Update article status error:", error);
+      res.status(500).json({ status: false, error: error.message });
+    }
   }
 );
-
 // ===========================================
 // SECTION 24: DATABASE NOTIFICATIONS ROUTES (NO WHATSAPP)
 // ===========================================
